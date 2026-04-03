@@ -359,7 +359,6 @@ export class Searcher {
 
   private extractLeijingShareLinks(content: string): string[] {
     const patterns = [
-      /https?:\/\/content\.21cn\.com[^\s"'<>（）()]+/g,
       /https?:\/\/cloud\.189\.cn\/web\/share\?[^\s"'<>（）()]+/g,
       /https?:\/\/cloud\.189\.cn\/t\/[A-Za-z0-9]+/g,
       /https?:\/\/h5\.cloud\.189\.cn\/share\.html#\/t\/[A-Za-z0-9]+/g,
