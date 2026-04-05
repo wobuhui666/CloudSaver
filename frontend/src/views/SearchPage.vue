@@ -5,7 +5,7 @@
         <p class="hero__eyebrow">CloudSaver Search</p>
         <h1>只保留资源搜索的轻量版本</h1>
         <p class="hero__description">
-          面向 `cloud189-auto-save` 的兼容接口保留不变，网页端聚焦 Telegram 频道、雷鲸小站与天翼搜资源检索。
+          面向 `cloud189-auto-save` 的兼容接口保留不变，网页端聚焦 Telegram 频道与雷鲸小站资源检索。
         </p>
       </div>
       <el-button class="hero__logout" plain @click="logout">退出登录</el-button>
@@ -32,9 +32,9 @@
       <span>上次刷新：{{ resourceStore.lastUpdateTime || "暂无" }}</span>
     </section>
 
-    <section v-if="resourceStore.resources.length" class="result-groups">
+    <section v-if="filteredResources.length" class="result-groups">
       <article
-        v-for="group in resourceStore.resources"
+        v-for="group in filteredResources"
         :key="group.id"
         class="result-group"
       >
@@ -58,6 +58,14 @@
               <div class="resource-card__meta">
                 <span class="meta__type">{{ resource.cloudType || "未知来源" }}</span>
                 <span>{{ formatDate(resource.pubDate) }}</span>
+                <span
+                  v-if="getLinkValidationLabel(resource)"
+                  class="meta__link-status"
+                  :class="`meta__link-status--${getLinkValidationState(resource).status}`"
+                  :title="getLinkValidationState(resource).message"
+                >
+                  {{ getLinkValidationLabel(resource) }}
+                </span>
               </div>
               <h3>{{ resource.title || "未命名资源" }}</h3>
               <p v-if="resource.content" class="resource-card__content">
@@ -82,14 +90,27 @@
             <footer class="resource-card__footer">
               <el-button type="primary" link @click="openLink(resource)">打开链接</el-button>
               <el-button link @click="copyLink(resource)">复制链接</el-button>
+              <el-button
+                link
+                :loading="getLinkValidationState(resource).status === 'checking'"
+                @click="revalidateLink(resource)"
+              >
+                重新检测
+              </el-button>
             </footer>
           </article>
         </div>
       </article>
     </section>
 
+    <section v-else-if="hasPendingValidation" class="empty-state">
+      <el-empty description="链接检测中，请稍等">
+        <p class="empty-state__hint">浮浮酱只展示已检测完成，且不是分享链接失效的结果喵～</p>
+      </el-empty>
+    </section>
+
     <section v-else class="empty-state">
-      <el-empty description="还没有搜索结果">
+      <el-empty :description="emptyStateDescription">
         <el-button type="primary" @click="loadLatest">查看最新资源</el-button>
       </el-empty>
     </section>
@@ -97,15 +118,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, reactive, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { useRouter } from "vue-router";
+import { resourceApi } from "@/api/resource";
 import { useResourceStore } from "@/stores/resource";
 import { STORAGE_KEYS } from "@/constants/storage";
-import type { ResourceItem } from "@/types";
+import type { LinkValidationResult, ResourceItem } from "@/types";
 
 const router = useRouter();
 const resourceStore = useResourceStore();
+
+type LinkValidationViewState = {
+  status: "idle" | "checking" | LinkValidationResult["status"];
+  message: string;
+  checkedAt?: string;
+  httpStatus?: number;
+};
+
+const linkValidationMap = reactive<Record<string, LinkValidationViewState>>({});
 
 const keyword = computed({
   get: () => resourceStore.keyword,
@@ -128,7 +159,125 @@ const loadMore = async (channelId: string) => {
 };
 
 const getPrimaryLink = (resource: ResourceItem) => {
-  return resource.cloudLinks[0] || "";
+  return resource.cloudLinks[0] || resource.articleUrl || "";
+};
+
+const createViewStateFromValidationResult = (
+  result?: LinkValidationResult
+): LinkValidationViewState | null => {
+  if (!result) {
+    return null;
+  }
+
+  return {
+    status: result.status,
+    message: result.message,
+    checkedAt: result.checkedAt,
+    httpStatus: result.httpStatus,
+  };
+};
+
+const getLinkValidationState = (resource: ResourceItem): LinkValidationViewState => {
+  const link = getPrimaryLink(resource);
+  if (!link) {
+    return {
+      status: "invalid",
+      message: "当前资源没有可检测的链接",
+    };
+  }
+
+  return (
+    linkValidationMap[link] ||
+    createViewStateFromValidationResult(resource.validationResult) || {
+      status: "idle",
+      message: "等待检测",
+    }
+  );
+};
+
+const getLinkValidationLabel = (resource: ResourceItem) => {
+  const state = getLinkValidationState(resource);
+  switch (state.status) {
+    case "checking":
+      return "检测中";
+    case "valid":
+      return "可访问";
+    case "invalid":
+      return "疑似失效";
+    case "unknown":
+      return "需人工确认";
+    case "error":
+      return "检测失败";
+    default:
+      return "";
+  }
+};
+
+const shouldDisplayResource = (resource: ResourceItem) => {
+  const status = getLinkValidationState(resource).status;
+  return status !== "idle" && status !== "checking" && status !== "invalid";
+};
+
+const filteredResources = computed(() => {
+  return resourceStore.resources
+    .map((group) => ({
+      ...group,
+      list: group.list.filter((resource) => shouldDisplayResource(resource)),
+    }))
+    .filter((group) => group.list.length > 0);
+});
+
+const validateLink = async (link: string, force = false) => {
+  if (!link) {
+    return;
+  }
+
+  const currentState = linkValidationMap[link];
+  if (!force && currentState && currentState.status !== "idle" && currentState.status !== "error") {
+    return;
+  }
+
+  if (currentState?.status === "checking") {
+    return;
+  }
+
+  linkValidationMap[link] = {
+    status: "checking",
+    message: "正在检测链接有效性",
+  };
+
+  try {
+    const response = await resourceApi.validateLink(link);
+    const result = response.data as LinkValidationResult | undefined;
+    if (!result) {
+      linkValidationMap[link] = {
+        status: "error",
+        message: "未拿到检测结果",
+      };
+      return;
+    }
+
+    linkValidationMap[link] = {
+      status: result.status,
+      message: result.message,
+      checkedAt: result.checkedAt,
+      httpStatus: result.httpStatus,
+    };
+  } catch (error) {
+    linkValidationMap[link] = {
+      status: "error",
+      message: error instanceof Error ? error.message : "链接检测失败",
+    };
+  }
+};
+
+const revalidateLink = async (resource: ResourceItem) => {
+  const link = getPrimaryLink(resource);
+  if (!link) {
+    ElMessage.warning("当前资源没有可检测的链接");
+    return;
+  }
+  await validateLink(link, true);
 };
 
 const openLink = (resource: ResourceItem) => {
@@ -165,6 +314,61 @@ const formatDate = (value?: string) => {
   }
   return date.toLocaleString("zh-CN", { hour12: false });
 };
+
+const validationTargets = computed(() => {
+  const links = new Set<string>();
+  resourceStore.resources.forEach((group) => {
+    group.list.forEach((resource) => {
+      const link = getPrimaryLink(resource);
+      if (link) {
+        links.add(link);
+      }
+    });
+  });
+  return Array.from(links);
+});
+
+const hasPendingValidation = computed(() => {
+  if (!resourceStore.resources.some((group) => group.list.length > 0)) {
+    return false;
+  }
+
+  return validationTargets.value.some((link) => {
+    const status = linkValidationMap[link]?.status;
+    return !status || status === "idle" || status === "checking";
+  });
+});
+
+const emptyStateDescription = computed(() => {
+  const hasResults = resourceStore.resources.some((group) => group.list.length > 0);
+  return hasResults ? "没有通过检测的可用结果" : "还没有搜索结果";
+});
+
+watch(
+  () => resourceStore.resources,
+  (groups) => {
+    groups.forEach((group) => {
+      group.list.forEach((resource) => {
+        const link = getPrimaryLink(resource);
+        const state = createViewStateFromValidationResult(resource.validationResult);
+        if (link && state) {
+          linkValidationMap[link] = state;
+        }
+      });
+    });
+  },
+  { immediate: true, deep: true }
+);
+
+watch(
+  validationTargets,
+  (links) => {
+    links.forEach((link) => {
+      void validateLink(link);
+    });
+  },
+  { immediate: true }
+);
 </script>
 
 <style scoped lang="scss">
@@ -284,8 +488,8 @@ const formatDate = (value?: string) => {
 
 .resource-card__meta {
   display: flex;
-  justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
   color: #6f7b87;
   font-size: 13px;
 }
@@ -293,6 +497,34 @@ const formatDate = (value?: string) => {
 .meta__type {
   color: #9a5a13;
   font-weight: 600;
+}
+
+.meta__link-status {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.meta__link-status--checking {
+  color: #8a6b1f;
+  background: rgba(233, 196, 106, 0.18);
+}
+
+.meta__link-status--valid {
+  color: #1f7a45;
+  background: rgba(91, 190, 123, 0.16);
+}
+
+.meta__link-status--invalid {
+  color: #b44343;
+  background: rgba(222, 107, 107, 0.16);
+}
+
+.meta__link-status--unknown,
+.meta__link-status--error {
+  color: #6b7280;
+  background: rgba(148, 163, 184, 0.18);
 }
 
 .resource-card h3 {
@@ -331,6 +563,12 @@ const formatDate = (value?: string) => {
 
 .resource-card__source a:hover {
   text-decoration: underline;
+}
+
+.empty-state__hint {
+  margin: 0;
+  color: #6c7a88;
+  font-size: 14px;
 }
 
 .resource-card__tags span {

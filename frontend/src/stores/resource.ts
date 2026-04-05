@@ -40,6 +40,7 @@ const normalizeResources = (data: RawResourceGroup[] = []): Resource[] => {
       list: group.list.map((item) => ({
         ...item,
         cloudLinks: normalizeCloudLinks(item.cloudLinks),
+        validationResult: item.validationResult,
         isSupportSave: false,
       })),
     }));

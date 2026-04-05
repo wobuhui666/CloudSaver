@@ -1,0 +1,30 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e6]:
+      - link "HDHIVE" [ref=e7] [cursor=pointer]:
+        - /url: /
+        - img [ref=e8]
+        - generic [ref=e9]: HDHIVE
+      - link "查询订单" [ref=e10] [cursor=pointer]:
+        - /url: https://shop.hdhive.com/order-search
+        - generic [ref=e13]: 查询订单
+    - generic [ref=e14]:
+      - generic [ref=e17]:
+        - generic [ref=e20]:
+          - textbox "输入关键词搜索..." [ref=e21]
+          - generic [ref=e22]: 
+        - heading " 公告" [level=4] [ref=e23]:
+          - button " 公告" [ref=e24] [cursor=pointer]:
+            - generic [ref=e25]: 
+            - text: 公告
+      - generic [ref=e26]:
+        - tab "全部" [ref=e27] [cursor=pointer]
+        - tab "Premium" [ref=e28] [cursor=pointer]
+  - contentinfo [ref=e65]:
+    - generic [ref=e67]:
+      - generic [ref=e69]:
+        - text: Powered by
+        - link "@独角数卡." [ref=e70] [cursor=pointer]:
+          - /url: https://github.com/assimon/dujiaoka
+      - generic [ref=e73]: HDHIVE
+    - text: W

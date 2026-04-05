@@ -1,0 +1,61 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e6]:
+      - link "HDHIVE" [ref=e7] [cursor=pointer]:
+        - /url: /
+        - img [ref=e8]
+        - generic [ref=e9]: HDHIVE
+      - link "查询订单" [ref=e10] [cursor=pointer]:
+        - /url: https://shop.hdhive.com/order-search
+        - generic [ref=e13]: 查询订单
+    - generic [ref=e14]:
+      - generic [ref=e17]:
+        - generic [ref=e20]:
+          - textbox "输入关键词搜索..." [ref=e21]
+          - generic [ref=e22]: 
+        - heading " 公告" [level=4] [ref=e23]:
+          - button " 公告" [ref=e24] [cursor=pointer]:
+            - generic [ref=e25]: 
+            - text: 公告
+      - generic [ref=e26]:
+        - tab "全部" [ref=e27] [cursor=pointer]
+        - tab "Premium" [ref=e28] [cursor=pointer]
+      - dialog [active] [ref=e29]:
+        - generic [ref=e30]:
+          - generic [ref=e31]:
+            - heading "公告" [level=5] [ref=e32]
+            - button [ref=e33] [cursor=pointer]: ×
+          - generic [ref=e34]:
+            - paragraph [ref=e35]: 本站点公益运营2年有余，23年2月-25年4月。期间也经历过不少波折，可还是坚持运营下去了。但随着工作的变动以及家庭生活的压力，我们不得不做出一些改变，于是开通了捐赠渠道，捐赠资金将用于网站日常运营、工作组的自购、工作组的流媒体会员、工作组的其他额外开支。是的没看错，我们基本全报销了。
+            - paragraph [ref=e36]: 我们自知大家来网站的目的是什么，所以我们需要告诉大家，我们并不是一个丰富的网站，也并不是一个及时的网站，请确认好需求后再进行捐赠。
+            - paragraph [ref=e37]
+            - paragraph [ref=e38]
+            - paragraph [ref=e39]:
+              - strong [ref=e41]: 【重要说明】
+            - paragraph [ref=e42]:
+              - strong [ref=e43]: 无账号别捐赠！！！
+              - strong [ref=e44]: 无账号别
+              - strong [ref=e45]: 捐赠
+              - strong [ref=e46]: ！！！
+              - strong [ref=e47]: 无账号别
+              - strong [ref=e48]: 捐赠
+              - strong [ref=e49]: ！！！
+              - strong [ref=e50]: 捐赠
+              - strong [ref=e51]: 了并不能获得账号！！！
+            - paragraph [ref=e52]:
+              - strong [ref=e54]: 如果垃圾箱里都没有收到兑换码，
+            - paragraph [ref=e55]:
+              - strong [ref=e57]: 请发送订单号至邮箱【admin@hdhive.com 或
+              - strong [ref=e59]: colaman@hdhive.com
+              - strong [ref=e60]: 】，
+              - strong [ref=e61]: 我们确认后将手动补发原兑换码。
+            - paragraph [ref=e62]:
+              - strong [ref=e64]: 也可以使用订单查询功能。
+  - contentinfo [ref=e65]:
+    - generic [ref=e67]:
+      - generic [ref=e69]:
+        - text: Powered by
+        - link "@独角数卡." [ref=e70] [cursor=pointer]:
+          - /url: https://github.com/assimon/dujiaoka
+      - generic [ref=e73]: HDHIVE
+    - text: W

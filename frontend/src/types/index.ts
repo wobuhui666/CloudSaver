@@ -13,6 +13,16 @@ export interface ResourceItem {
   isSupportSave?: boolean;
   sourceName?: string;
   articleUrl?: string;
+  validationResult?: LinkValidationResult;
+}
+
+export interface LinkValidationResult {
+  status: "valid" | "invalid" | "unknown" | "error";
+  httpStatus: number;
+  checkedUrl: string;
+  finalUrl: string;
+  message: string;
+  checkedAt: string;
 }
 
 export interface Resource {

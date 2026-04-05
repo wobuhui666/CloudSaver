@@ -45,4 +45,15 @@ router.get("/search", async (req, res) => {
   }
 });
 
+router.get("/link/validate", async (req, res) => {
+  try {
+    const { url = "" } = req.query;
+    const result = await searcher.validateLink(String(url));
+    res.json(ApiResponse.success(result));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "链接检测失败";
+    res.status(200).json(ApiResponse.error(message));
+  }
+});
+
 export default router;

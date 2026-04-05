@@ -1,7 +1,6 @@
 import { AxiosInstance, AxiosHeaders } from "axios";
 import { createAxiosInstance } from "../utils/axiosInstance";
 import * as cheerio from "cheerio";
-import { createCipheriv } from "crypto";
 import { config } from "../config";
 import { logger } from "../utils/logger";
 
@@ -24,6 +23,7 @@ interface SourceItem {
   cloudType?: string;
   sourceName?: string;
   articleUrl?: string;
+  validationResult?: LinkValidationResult;
 }
 
 interface SearchGroup {
@@ -44,40 +44,77 @@ interface ExternalPost {
   abstract: string;
 }
 
-interface TianyisoFetchResult {
-  html: string;
-  status: number;
-  challenged: boolean;
-}
-
-interface SolverCookie {
+interface TelegramChannel {
+  id: string;
   name: string;
-  value: string;
 }
 
-interface SolverResponse {
-  status?: string;
+interface TMDBSearchCandidate {
+  tmdbId: string;
+  type: "movie" | "tv";
+  title: string;
+  description: string;
+  image?: string;
+  releaseDate?: string;
+}
+
+interface HDHiveOpenResponse<T> {
+  success?: boolean;
+  code?: string | number;
   message?: string;
-  solution?: {
-    response?: string;
-    userAgent?: string;
-    cookies?: SolverCookie[];
+  data?: T;
+  meta?: {
+    total?: number;
   };
 }
 
+interface HDHiveResourceItem {
+  slug: string;
+  title?: string | null;
+  share_size?: string | null;
+  video_resolution?: string[];
+  source?: string[];
+  subtitle_language?: string[];
+  subtitle_type?: string[];
+  remark?: string | null;
+  unlock_points?: number | null;
+  unlocked_users_count?: number | null;
+  validate_status?: string | null;
+  validate_message?: string | null;
+  last_validated_at?: string | null;
+  is_official?: boolean | null;
+  is_unlocked?: boolean;
+  created_at?: string | null;
+}
+
+interface HDHiveUnlockData {
+  url?: string;
+  access_code?: string | null;
+  full_url?: string;
+  already_owned?: boolean;
+}
+
+export interface LinkValidationResult {
+  status: "valid" | "invalid" | "unknown" | "error";
+  httpStatus: number;
+  checkedUrl: string;
+  finalUrl: string;
+  message: string;
+  checkedAt: string;
+}
 export class Searcher {
   private static instance: Searcher;
   private api: AxiosInstance | null = null;
   private readonly leijingBaseUrl = "https://www.leijing2.com";
+  private readonly tmdbBaseUrl = "https://www.themoviedb.org";
+  private readonly hdhiveBaseUrl = "https://hdhive.com";
   private readonly leijingMaxPosts = 8;
+  private readonly telegramSearchConcurrency = 12;
+  private readonly hdhiveSearchConcurrency = 4;
   private readonly leijingRememberCookieHeader = [
     "33ee0edee363cf05042563418af465a8__typecho_remember_author=cloud189-user",
     "33ee0edee363cf05042563418af465a8__typecho_remember_mail=cloud189-user%40example.com",
   ].join("; ");
-  private readonly tianyisoBaseUrl = "https://www.tianyiso.com";
-  private readonly tianyisoMaxPosts = 12;
-  private tianyisoRuntimeCookieHeader = "";
-  private tianyisoRuntimeUserAgent = "";
 
   constructor() {
     this.initAxiosInstance();
@@ -134,55 +171,169 @@ export class Searcher {
     };
   }
 
+  async validateLink(url: string): Promise<LinkValidationResult> {
+    const checkedAt = new Date().toISOString();
+    const normalizedUrl = url.trim();
+
+    if (!normalizedUrl) {
+      return {
+        status: "invalid",
+        httpStatus: 0,
+        checkedUrl: normalizedUrl,
+        finalUrl: "",
+        message: "链接为空",
+        checkedAt,
+      };
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(normalizedUrl);
+    } catch (error) {
+      return {
+        status: "invalid",
+        httpStatus: 0,
+        checkedUrl: normalizedUrl,
+        finalUrl: "",
+        message: "链接格式无效",
+        checkedAt,
+      };
+    }
+
+    try {
+      const response = await this.api?.get<string>(normalizedUrl, {
+        baseURL: undefined,
+        timeout: 12000,
+        maxRedirects: 5,
+        validateStatus: () => true,
+        responseType: "text",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+          Referer: `${parsedUrl.protocol}//${parsedUrl.host}/`,
+        },
+      });
+
+      const httpStatus = Number(response?.status || 0);
+      const finalUrl = String(response?.request?.res?.responseUrl || normalizedUrl);
+      const body = String(response?.data || "");
+      const bodyText = this.normalizeValidationText(body);
+
+      if (httpStatus === 404 || httpStatus === 410) {
+        return {
+          status: "invalid",
+          httpStatus,
+          checkedUrl: normalizedUrl,
+          finalUrl,
+          message: `HTTP ${httpStatus}，链接疑似已失效`,
+          checkedAt,
+        };
+      }
+
+      if (this.hasInvalidShareMarkers(bodyText)) {
+        return {
+          status: "invalid",
+          httpStatus,
+          checkedUrl: normalizedUrl,
+          finalUrl,
+          message: "页面提示资源不存在或分享已失效",
+          checkedAt,
+        };
+      }
+
+      if (httpStatus >= 200 && httpStatus < 400) {
+        return {
+          status: "valid",
+          httpStatus,
+          checkedUrl: normalizedUrl,
+          finalUrl,
+          message: `HTTP ${httpStatus}，链接可访问`,
+          checkedAt,
+        };
+      }
+
+      if (httpStatus === 401 || httpStatus === 403) {
+        return {
+          status: "unknown",
+          httpStatus,
+          checkedUrl: normalizedUrl,
+          finalUrl,
+          message: `HTTP ${httpStatus}，目标站点拒绝探测，请人工确认`,
+          checkedAt,
+        };
+      }
+
+      if (httpStatus > 0) {
+        return {
+          status: "unknown",
+          httpStatus,
+          checkedUrl: normalizedUrl,
+          finalUrl,
+          message: `HTTP ${httpStatus}，暂时无法确定链接是否有效`,
+          checkedAt,
+        };
+      }
+    } catch (error) {
+      logger.warn(`链接有效性检测失败: ${normalizedUrl}`);
+      return {
+        status: "error",
+        httpStatus: 0,
+        checkedUrl: normalizedUrl,
+        finalUrl: normalizedUrl,
+        message: "请求失败，暂时无法完成检测",
+        checkedAt,
+      };
+    }
+
+    return {
+      status: "unknown",
+      httpStatus: 0,
+      checkedUrl: normalizedUrl,
+      finalUrl: normalizedUrl,
+      message: "暂时无法确定链接是否有效",
+      checkedAt,
+    };
+  }
+
   async searchAll(keyword: string, channelId?: string, messageId?: string) {
     const allResults: SearchGroup[] = [];
     const isLeijingOnly = channelId === "leijing2";
-    const isTianyisoOnly = channelId === "tianyiso";
+    const isHDHiveOnly = channelId === "hdhive";
 
-    const channelList: any[] = isLeijingOnly || isTianyisoOnly
+    const channelList: TelegramChannel[] = isLeijingOnly || isHDHiveOnly
       ? []
       : channelId
-      ? config.telegram.channels.filter((channel: any) => channel.id === channelId)
+      ? config.telegram.channels.filter((channel) => channel.id === channelId)
       : config.telegram.channels;
 
-    if (channelList.length === 0 && !isLeijingOnly && !isTianyisoOnly && channelId) {
+    if (channelList.length === 0 && !isLeijingOnly && !isHDHiveOnly && channelId) {
       return {
         data: [],
       };
     }
 
-    const searchPromises = channelList.map(async (channel) => {
+    const telegramGroups = await this.mapWithConcurrency(
+      channelList,
+      this.telegramSearchConcurrency,
+      async (channel) => this.searchTelegramChannel(channel, keyword, messageId)
+    );
+
+    allResults.push(
+      ...telegramGroups.filter((group): group is SearchGroup => Boolean(group))
+    );
+
+    if (!messageId && keyword.trim() && (!channelId || isHDHiveOnly)) {
       try {
-        const messageIdparams = messageId ? `before=${messageId}` : "";
-        const url = `/${channel.id}${keyword ? `?q=${encodeURIComponent(keyword)}&${messageIdparams}` : `?${messageIdparams}`}`;
-        logger.info(`Searching in channel ${channel.name} with URL: ${url}`);
-        return this.searchInWeb(url).then((results) => {
-          logger.info(`Found ${results.items.length} items in channel ${channel.name}`);
-          if (results.items.length > 0) {
-            const channelResults = results.items
-              .filter((item: SourceItem) => item.cloudLinks && item.cloudLinks.length > 0)
-              .map((item: SourceItem) => ({
-                ...item,
-                channel: channel.name,
-                channelId: channel.id,
-              }));
-
-            allResults.push({
-              list: channelResults,
-              channelInfo: {
-                ...channel,
-                channelLogo: results.channelLogo,
-              },
-              id: channel.id,
-            });
-          }
-        });
+        const hdhiveGroup = await this.searchHDHive(keyword.trim());
+        if (hdhiveGroup?.list.length) {
+          allResults.push(hdhiveGroup);
+        }
       } catch (error) {
-        logger.error(`搜索频道 ${channel.name} 失败:`, error);
+        logger.error("搜索影巢失败:", error);
       }
-    });
-
-    await Promise.all(searchPromises);
+    }
 
     if (!messageId && (!channelId || isLeijingOnly)) {
       try {
@@ -195,20 +346,447 @@ export class Searcher {
       }
     }
 
-    if (!messageId && (!channelId || isTianyisoOnly)) {
-      try {
-        const tianyisoGroup = await this.searchTianyiso(keyword);
-        if (tianyisoGroup.list.length > 0) {
-          allResults.push(tianyisoGroup);
+    const validatedResults = await this.filterSearchGroups(allResults);
+    return {
+      data: validatedResults,
+    };
+  }
+
+  private async filterSearchGroups(groups: SearchGroup[]): Promise<SearchGroup[]> {
+    const validationCache = new Map<string, Promise<LinkValidationResult>>();
+    const validatedGroups = await Promise.all(
+      groups.map(async (group) => {
+        const validatedItems = await Promise.all(
+          group.list.map(async (item) => this.validateSearchItem(item, validationCache))
+        );
+        const list = validatedItems.filter((item): item is SourceItem => Boolean(item));
+
+        if (!list.length) {
+          return null;
         }
-      } catch (error) {
-        logger.error("搜索天翼搜失败:", error);
-      }
+
+        return {
+          ...group,
+          list,
+        };
+      })
+    );
+
+    return validatedGroups.filter((group): group is SearchGroup => Boolean(group));
+  }
+
+  private async validateSearchItem(
+    item: SourceItem,
+    validationCache: Map<string, Promise<LinkValidationResult>>
+  ): Promise<SourceItem | null> {
+    const primaryLink = item.cloudLinks?.[0]?.link || item.articleUrl || "";
+    if (!primaryLink) {
+      return null;
+    }
+
+    const validationTask = this.getValidationTask(primaryLink, validationCache);
+    const validationResult = await validationTask;
+
+    if (validationResult.status === "invalid") {
+      return null;
     }
 
     return {
-      data: allResults,
+      ...item,
+      validationResult,
     };
+  }
+
+  private getValidationTask(
+    link: string,
+    validationCache: Map<string, Promise<LinkValidationResult>>
+  ): Promise<LinkValidationResult> {
+    const cachedTask = validationCache.get(link);
+    if (cachedTask) {
+      return cachedTask;
+    }
+
+    const validationTask = this.validateLink(link)
+      .catch((error) => {
+        logger.warn(`链接有效性检测任务失败: ${link}`);
+        throw error;
+      })
+      .finally(() => {
+        const currentTask = validationCache.get(link);
+        if (currentTask === validationTask) {
+          validationCache.delete(link);
+        }
+      });
+
+    validationCache.set(link, validationTask);
+    return validationTask;
+  }
+
+  private async searchHDHive(keyword: string): Promise<SearchGroup | null> {
+    if (!config.hdhive.enabled) {
+      return null;
+    }
+
+    if (!config.hdhive.apiKey) {
+      logger.info("影巢搜索已跳过：未配置 HDHIVE_API_KEY");
+      return null;
+    }
+
+    const candidates = await this.fetchTMDBSearchCandidates(keyword);
+    if (!candidates.length) {
+      return null;
+    }
+
+    const resolvedResults = await this.mapWithConcurrency(
+      candidates,
+      this.hdhiveSearchConcurrency,
+      async (candidate) => this.resolveHDHiveCandidate(candidate)
+    );
+
+    const dedupedItems = new Map<string, SourceItem>();
+    resolvedResults.flat().forEach((item) => {
+      const primaryLink = item.cloudLinks?.[0]?.link || "";
+      if (!primaryLink || dedupedItems.has(primaryLink)) {
+        return;
+      }
+      dedupedItems.set(primaryLink, item);
+    });
+
+    if (!dedupedItems.size) {
+      return null;
+    }
+
+    return {
+      id: "hdhive",
+      supportsLoadMore: false,
+      channelInfo: {
+        id: "hdhive",
+        name: "影巢 HDHive",
+        channelLogo: `${this.hdhiveBaseUrl}/favicon.ico`,
+      },
+      list: Array.from(dedupedItems.values()),
+    };
+  }
+
+  private async fetchTMDBSearchCandidates(keyword: string): Promise<TMDBSearchCandidate[]> {
+    const searchUrl = `${this.tmdbBaseUrl}/search?query=${encodeURIComponent(keyword)}`;
+    const response = await this.api?.get<string>(searchUrl, {
+      baseURL: undefined,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      },
+    });
+    const html = String(response?.data || "");
+    const $ = cheerio.load(html);
+    const candidates: TMDBSearchCandidate[] = [];
+    const seen = new Set<string>();
+    const limit = Math.max(1, config.hdhive.tmdbSearchLimit);
+
+    $(".search_results.tv, .search_results.movie").each((_, section) => {
+      const sectionEl = $(section);
+      const sectionType = sectionEl.hasClass("movie") ? "movie" : "tv";
+
+      sectionEl.find(".media-card-list > div").each((__, card) => {
+        if (candidates.length >= limit) {
+          return false;
+        }
+
+        const cardEl = $(card);
+        const linkEl = cardEl.find("a[data-media-type]").first();
+        const href = linkEl.attr("href") || "";
+        const match = href.match(/\/(movie|tv)\/(\d+)/);
+        if (!match) {
+          return undefined;
+        }
+
+        const type = (match[1] as "movie" | "tv") || sectionType;
+        const tmdbId = match[2];
+        const dedupeKey = `${type}:${tmdbId}`;
+        if (!tmdbId || seen.has(dedupeKey)) {
+          return undefined;
+        }
+
+        const title =
+          cardEl.find("h2 span").first().text().trim() ||
+          linkEl.text().replace(/\s+/g, " ").trim();
+        const description = cardEl.find(".mt-4 p").text().replace(/\s+/g, " ").trim();
+        const releaseDate = cardEl.find(".release_date").text().replace(/\s+/g, " ").trim();
+        const image = cardEl.find("img.poster").attr("src") || "";
+
+        seen.add(dedupeKey);
+        candidates.push({
+          tmdbId,
+          type,
+          title,
+          description,
+          releaseDate,
+          image,
+        });
+
+        return undefined;
+      });
+
+      if (candidates.length >= limit) {
+        return false;
+      }
+
+      return undefined;
+    });
+
+    return candidates;
+  }
+
+  private async resolveHDHiveCandidate(candidate: TMDBSearchCandidate): Promise<SourceItem[]> {
+    const resources = await this.fetchHDHiveResources(candidate);
+    if (!resources.length) {
+      return [];
+    }
+
+    const safeResources = resources
+      .filter((resource) => this.isHDHiveResourceUnlockable(resource))
+      .filter((resource) => resource.validate_status !== "invalid")
+      .slice(0, Math.max(1, config.hdhive.resourceLimit));
+
+    if (!safeResources.length) {
+      return [];
+    }
+
+    const results = await Promise.allSettled(
+      safeResources.map(async (resource) => this.buildHDHiveSourceItem(candidate, resource))
+    );
+
+    return results
+      .filter(
+        (result): result is PromiseFulfilledResult<SourceItem | null> => result.status === "fulfilled"
+      )
+      .map((result) => result.value)
+      .filter((item): item is SourceItem => Boolean(item));
+  }
+
+  private async fetchHDHiveResources(candidate: TMDBSearchCandidate): Promise<HDHiveResourceItem[]> {
+    const requestUrl = `${this.hdhiveBaseUrl}/api/open/resources/${candidate.type}/${candidate.tmdbId}`;
+    const response = await this.api?.get<HDHiveOpenResponse<HDHiveResourceItem[]>>(requestUrl, {
+      baseURL: undefined,
+      validateStatus: () => true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        Accept: "application/json, text/plain, */*",
+        "X-API-Key": config.hdhive.apiKey,
+      },
+    });
+
+    if (!response || response.status !== 200) {
+      const errorCode =
+        typeof response?.data === "object" && response?.data ? String(response.data.code || "") : "";
+      logger.warn(
+        `影巢资源查询失败: ${candidate.type}/${candidate.tmdbId} status=${response?.status || 0} code=${errorCode}`
+      );
+      return [];
+    }
+
+    return Array.isArray(response.data?.data) ? response.data.data : [];
+  }
+
+  private isHDHiveResourceUnlockable(resource: HDHiveResourceItem): boolean {
+    if (resource.is_unlocked) {
+      return true;
+    }
+
+    if (resource.unlock_points === null || resource.unlock_points === undefined) {
+      return true;
+    }
+
+    return Number(resource.unlock_points) === 0;
+  }
+
+  private async buildHDHiveSourceItem(
+    candidate: TMDBSearchCandidate,
+    resource: HDHiveResourceItem
+  ): Promise<SourceItem | null> {
+    if (!resource.slug) {
+      return null;
+    }
+
+    const unlockData = await this.unlockHDHiveResource(resource.slug);
+    const rawLink = String(unlockData?.full_url || unlockData?.url || "").trim();
+    if (!rawLink) {
+      return null;
+    }
+
+    const cloudInfo = this.toCloudInfo(rawLink);
+    const tagSet = new Set<string>([
+      "#影巢",
+      candidate.type === "movie" ? "#电影" : "#剧集",
+      resource.is_unlocked ? "#已解锁" : "#免费",
+    ]);
+
+    (resource.video_resolution || []).slice(0, 2).forEach((item) => tagSet.add(`#${item}`));
+    (resource.source || []).slice(0, 2).forEach((item) => tagSet.add(`#${item}`));
+    if (resource.is_official) {
+      tagSet.add("#官方");
+    }
+
+    const content = [
+      resource.title && resource.title !== candidate.title ? resource.title : "",
+      resource.share_size ? `大小：${resource.share_size}` : "",
+      resource.remark ? `备注：${resource.remark}` : "",
+      candidate.description,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    return {
+      messageId: `hdhive-${resource.slug}`,
+      title: resource.title || candidate.title,
+      completeTitle: resource.title || candidate.title,
+      pubDate: resource.created_at || candidate.releaseDate || "",
+      content,
+      image: candidate.image,
+      cloudLinks: cloudInfo.links,
+      cloudType: cloudInfo.cloudType,
+      tags: Array.from(tagSet).slice(0, 6),
+      sourceName: "影巢 HDHive",
+      articleUrl: `${this.hdhiveBaseUrl}/${candidate.type}/${resource.slug}`,
+    };
+  }
+
+  private async unlockHDHiveResource(slug: string): Promise<HDHiveUnlockData | null> {
+    const response = await this.api?.post<HDHiveOpenResponse<HDHiveUnlockData>>(
+      `${this.hdhiveBaseUrl}/api/open/resources/unlock`,
+      { slug },
+      {
+        baseURL: undefined,
+        validateStatus: () => true,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Content-Type": "application/json",
+          "X-API-Key": config.hdhive.apiKey,
+        },
+      }
+    );
+
+    if (!response || response.status !== 200) {
+      return null;
+    }
+
+    return response.data?.data || null;
+  }
+
+  private toCloudInfo(link: string): { links: CloudLinkItem[]; cloudType: string } {
+    const extracted = this.extractCloudLinks(link);
+    if (extracted.links.length > 0) {
+      return extracted;
+    }
+
+    return {
+      links: [
+        {
+          cloudType: this.inferCloudType(link),
+          link,
+        },
+      ],
+      cloudType: this.inferCloudType(link),
+    };
+  }
+
+  private inferCloudType(link: string): string {
+    try {
+      const hostname = new URL(link).hostname.toLowerCase();
+
+      if (hostname.includes("cloud.189.cn")) {
+        return "tianyi";
+      }
+      if (hostname.includes("pan.quark.cn")) {
+        return "quark";
+      }
+      if (hostname.includes("pan.baidu.com") || hostname.includes("yun.baidu.com")) {
+        return "baiduPan";
+      }
+      if (hostname.includes("aliyundrive.com") || hostname.includes("alipan.com")) {
+        return "aliyun";
+      }
+      if (hostname.includes("115.com") || hostname.includes("anxia.com") || hostname.includes("115cdn.com")) {
+        return "pan115";
+      }
+      if (hostname.includes("123")) {
+        return "pan123";
+      }
+      if (hostname.includes("t.me")) {
+        return "telegram";
+      }
+
+      return hostname.replace(/^www\./, "") || "direct";
+    } catch (error) {
+      return "direct";
+    }
+  }
+
+  private async searchTelegramChannel(
+    channel: TelegramChannel,
+    keyword: string,
+    messageId?: string
+  ): Promise<SearchGroup | null> {
+    try {
+      const messageIdparams = messageId ? `before=${messageId}` : "";
+      const url = `/${channel.id}${keyword ? `?q=${encodeURIComponent(keyword)}&${messageIdparams}` : `?${messageIdparams}`}`;
+      logger.info(`Searching in channel ${channel.name} with URL: ${url}`);
+      const results = await this.searchInWeb(url);
+      logger.info(`Found ${results.items.length} items in channel ${channel.name}`);
+
+      const channelResults = results.items
+        .filter((item: SourceItem) => item.cloudLinks && item.cloudLinks.length > 0)
+        .map((item: SourceItem) => ({
+          ...item,
+          channel: channel.name,
+          channelId: channel.id,
+        }));
+
+      if (!channelResults.length) {
+        return null;
+      }
+
+      return {
+        list: channelResults,
+        channelInfo: {
+          ...channel,
+          channelLogo: results.channelLogo,
+        },
+        id: channel.id,
+      };
+    } catch (error) {
+      logger.error(`搜索频道 ${channel.name} 失败:`, error);
+      return null;
+    }
+  }
+
+  private async mapWithConcurrency<T, TResult>(
+    items: T[],
+    concurrency: number,
+    mapper: (item: T, index: number) => Promise<TResult>
+  ): Promise<TResult[]> {
+    if (!items.length) {
+      return [];
+    }
+
+    const results = new Array<TResult>(items.length);
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    let currentIndex = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (currentIndex < items.length) {
+        const index = currentIndex;
+        currentIndex += 1;
+        results[index] = await mapper(items[index], index);
+      }
+    });
+
+    await Promise.all(workers);
+    return results;
   }
 
   async searchInWeb(url: string) {
@@ -402,377 +980,6 @@ export class Searcher {
     return match ? match[1] : html;
   }
 
-  private async searchTianyiso(keyword: string): Promise<SearchGroup> {
-    const html = await this.fetchTianyisoSearchPage(keyword);
-    const posts = this.parseTianyisoPosts(html, keyword).slice(0, this.tianyisoMaxPosts);
-    const list: SourceItem[] = [];
-
-    const detailResults = await Promise.allSettled(
-      posts.map(async (post) => this.resolveTianyisoPost(post, keyword))
-    );
-
-    detailResults.forEach((result) => {
-      if (result.status === "fulfilled" && result.value) {
-        list.push(result.value);
-      }
-    });
-
-    return {
-      id: "tianyiso",
-      supportsLoadMore: false,
-      channelInfo: {
-        id: "tianyiso",
-        name: "天翼搜",
-        channelLogo: "",
-      },
-      list,
-    };
-  }
-
-  private async fetchTianyisoSearchPage(keyword: string): Promise<string> {
-    const url = `${this.tianyisoBaseUrl}/search?k=${encodeURIComponent(keyword)}`;
-    return this.fetchTianyisoPage(url, this.tianyisoBaseUrl);
-  }
-
-  private async fetchTianyisoArticlePage(url: string): Promise<string> {
-    return this.fetchTianyisoPage(url, `${this.tianyisoBaseUrl}/`);
-  }
-
-  private async fetchTianyisoPage(url: string, referer: string): Promise<string> {
-    const directResult = await this.fetchTianyisoDirect(url, referer);
-    if (!directResult.challenged) {
-      return directResult.html;
-    }
-
-    const legacyBypassCookie = this.createTianyisoBypassCookie(directResult.html);
-    if (legacyBypassCookie) {
-      logger.info(`检测到旧版天翼搜校验页，尝试注入绕过 cookie: ${url}`);
-      const legacyResult = await this.fetchTianyisoDirect(url, referer, legacyBypassCookie);
-      if (!legacyResult.challenged) {
-        return legacyResult.html;
-      }
-    }
-
-    const solverResult = await this.fetchTianyisoViaSolver(url);
-    if (solverResult && !solverResult.challenged) {
-      logger.info(`天翼搜已通过求解器返回可用页面: ${url}`);
-      return solverResult.html;
-    }
-
-    logger.warn(
-      `天翼搜仍处于 Cloudflare 校验状态，当前状态码: ${directResult.status}，URL: ${url}`
-    );
-    return directResult.html;
-  }
-
-  private async fetchTianyisoDirect(
-    url: string,
-    referer: string,
-    extraCookieHeader: string = ""
-  ): Promise<TianyisoFetchResult> {
-    const response = await this.api?.get(url, {
-      baseURL: undefined,
-      headers: this.buildTianyisoHeaders(referer, extraCookieHeader),
-      validateStatus: () => true,
-    });
-
-    const html = String(response?.data || "");
-    const status = Number(response?.status || 0);
-    return {
-      html,
-      status,
-      challenged: this.isTianyisoChallengeResponse(status, response?.headers, html),
-    };
-  }
-
-  private buildTianyisoHeaders(referer: string, extraCookieHeader: string = "") {
-    const cookieHeader = this.mergeCookieHeaders(
-      config.tianyiso.cookie,
-      this.tianyisoRuntimeCookieHeader,
-      extraCookieHeader
-    );
-
-    return {
-      "User-Agent": this.getTianyisoUserAgent(),
-      Referer: referer,
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-      "Cache-Control": "no-cache",
-      Pragma: "no-cache",
-      "Upgrade-Insecure-Requests": "1",
-      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-    };
-  }
-
-  private getTianyisoUserAgent(): string {
-    return this.tianyisoRuntimeUserAgent || config.tianyiso.userAgent;
-  }
-
-  private mergeCookieHeaders(...cookieHeaders: string[]): string {
-    const cookieMap = new Map<string, string>();
-
-    cookieHeaders
-      .filter(Boolean)
-      .flatMap((header) => header.split(";"))
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .forEach((part) => {
-        const separatorIndex = part.indexOf("=");
-        if (separatorIndex <= 0) {
-          return;
-        }
-
-        const name = part.slice(0, separatorIndex).trim();
-        const value = part.slice(separatorIndex + 1).trim();
-        if (name && value) {
-          cookieMap.set(name, value);
-        }
-      });
-
-    return Array.from(cookieMap.entries())
-      .map(([name, value]) => `${name}=${value}`)
-      .join("; ");
-  }
-
-  private isTianyisoChallengeResponse(
-    status: number,
-    headers: Record<string, unknown> | undefined,
-    html: string
-  ): boolean {
-    const cfMitigated = String(headers?.["cf-mitigated"] || "").toLowerCase();
-    const server = String(headers?.server || "").toLowerCase();
-
-    if (cfMitigated === "challenge") {
-      return true;
-    }
-
-    return (
-      (status === 403 && server.includes("cloudflare")) ||
-      /<title>\s*(?:Just a moment|请稍候)/i.test(html) ||
-      /Performing security verification/i.test(html) ||
-      /cf-turnstile-response/i.test(html) ||
-      /cdn-cgi\/challenge-platform/i.test(html)
-    );
-  }
-
-  private async fetchTianyisoViaSolver(url: string): Promise<TianyisoFetchResult | null> {
-    if (!config.tianyiso.solver.url) {
-      return null;
-    }
-
-    try {
-      logger.info(`检测到 Cloudflare 挑战，尝试调用天翼搜求解器: ${url}`);
-
-      const response = await this.api?.post<SolverResponse>(
-        config.tianyiso.solver.url,
-        {
-          cmd: "request.get",
-          url,
-          maxTimeout: config.tianyiso.solver.timeoutMs,
-          session: config.tianyiso.solver.session || undefined,
-          cookies: this.parseCookieHeader(config.tianyiso.cookie),
-          waitInSeconds: config.tianyiso.solver.waitInSeconds,
-          returnOnlyCookies: false,
-          download: false,
-          session_ttl_minutes: 30,
-          tabsTillVerify: config.tianyiso.solver.tabsTillVerify,
-        },
-        {
-          baseURL: undefined,
-          validateStatus: () => true,
-        }
-      );
-
-      const data = response?.data;
-      const html = String(data?.solution?.response || "");
-      const status = Number(response?.status || 0);
-
-      if (data?.solution?.cookies?.length) {
-        this.tianyisoRuntimeCookieHeader = this.cookiesToHeader(data.solution.cookies);
-      }
-
-      if (data?.solution?.userAgent) {
-        this.tianyisoRuntimeUserAgent = data.solution.userAgent;
-      }
-
-      if (data?.status !== "ok" || !html) {
-        logger.warn(
-          `天翼搜求解器返回异常: HTTP ${status} / ${data?.status || "unknown"} / ${data?.message || "no message"}`
-        );
-        return null;
-      }
-
-      return {
-        html,
-        status,
-        challenged: this.isTianyisoChallengeResponse(status, undefined, html),
-      };
-    } catch (error) {
-      logger.warn(`调用天翼搜求解器失败: ${String(error)}`);
-      return null;
-    }
-  }
-
-  private parseCookieHeader(cookieHeader: string): SolverCookie[] {
-    return cookieHeader
-      .split(";")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => {
-        const separatorIndex = part.indexOf("=");
-        if (separatorIndex <= 0) {
-          return null;
-        }
-
-        return {
-          name: part.slice(0, separatorIndex).trim(),
-          value: part.slice(separatorIndex + 1).trim(),
-        };
-      })
-      .filter((item): item is SolverCookie => Boolean(item?.name && item?.value));
-  }
-
-  private cookiesToHeader(cookies: SolverCookie[]): string {
-    return cookies
-      .filter((cookie) => cookie.name && cookie.value)
-      .map((cookie) => `${cookie.name}=${cookie.value}`)
-      .join("; ");
-  }
-
-  private parseTianyisoPosts(html: string, keyword: string): ExternalPost[] {
-    const $ = cheerio.load(html);
-    const posts = new Map<string, ExternalPost>();
-
-    const addPost = (rawUrl?: string, rawTitle?: string, rawAbstract?: string) => {
-      if (!rawUrl || !rawTitle) {
-        return;
-      }
-
-      let absoluteUrl = "";
-      try {
-        absoluteUrl = new URL(rawUrl, this.tianyisoBaseUrl).toString();
-      } catch (error) {
-        return;
-      }
-
-      if (!this.isTianyisoDetailUrl(absoluteUrl)) {
-        return;
-      }
-
-      const title = this.stripTags(this.decodeHtml(rawTitle)).trim();
-      const abstract = this.stripTags(this.decodeHtml(rawAbstract || "")).trim();
-      if (!title || !this.matchesKeyword(`${title} ${abstract}`, keyword)) {
-        return;
-      }
-
-      const id = new URL(absoluteUrl).pathname.replace(/\/+$/g, "").split("/").pop() || "";
-      if (!id || posts.has(absoluteUrl)) {
-        return;
-      }
-
-      posts.set(absoluteUrl, {
-        id,
-        title,
-        url: absoluteUrl,
-        abstract,
-      });
-    };
-
-    $("a[href]").each((_, element) => {
-      const anchor = $(element);
-      const href = anchor.attr("href");
-      const title =
-        anchor.attr("title") ||
-        anchor.attr("aria-label") ||
-        anchor.find("img").attr("alt") ||
-        anchor.text();
-      const abstract = anchor
-        .closest("article, li, .item, .post, .card, .entry, .search-item, .result-item, .panel")
-        .text();
-
-      addPost(href, title, abstract);
-    });
-
-    if (posts.size > 0) {
-      return Array.from(posts.values());
-    }
-
-    const pattern = /<a[^>]+href="([^"]*\/s\/[A-Za-z0-9_-]+[^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
-    for (const match of html.matchAll(pattern)) {
-      addPost(match[1], match[2], match[0]);
-    }
-
-    return Array.from(posts.values());
-  }
-
-  private async resolveTianyisoPost(post: ExternalPost, keyword: string): Promise<SourceItem | null> {
-    const linkSet = new Map<string, CloudLinkItem>();
-    let content = post.abstract;
-
-    this.extractTianyiShareLinks(post.abstract).forEach((link) => {
-      linkSet.set(link, { cloudType: "tianyi", link });
-    });
-
-    try {
-      const html = await this.fetchTianyisoArticlePage(post.url);
-      content = this.extractTianyisoArticleContent(html);
-      this.extractTianyiShareLinks(content).forEach((link) => {
-        linkSet.set(link, { cloudType: "tianyi", link });
-      });
-    } catch (error) {
-      logger.warn(`抓取天翼搜文章失败: ${post.url}`);
-    }
-
-    if (!this.matchesKeyword(`${post.title} ${post.abstract} ${this.stripTags(content)}`, keyword)) {
-      return null;
-    }
-
-    const cloudLinks = Array.from(linkSet.values());
-    if (!cloudLinks.length) {
-      return null;
-    }
-
-    return {
-      messageId: `tianyiso-${post.id}`,
-      title: post.title,
-      completeTitle: post.title,
-      pubDate: "",
-      content: "来自天翼搜的帖子分享链接",
-      cloudLinks,
-      cloudType: "tianyi",
-      tags: ["#天翼搜"],
-      sourceName: "天翼搜",
-      articleUrl: post.url,
-    };
-  }
-
-  private extractTianyisoArticleContent(html: string): string {
-    const patterns = [
-      /<main[^>]*>([\s\S]*?)<\/main>/i,
-      /<article[^>]*>([\s\S]*?)<\/article>/i,
-      /<body[^>]*>([\s\S]*?)<\/body>/i,
-    ];
-
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match?.[1]) {
-        return match[1];
-      }
-    }
-
-    return html;
-  }
-
-  private isTianyisoDetailUrl(url: string): boolean {
-    try {
-      const detailUrl = new URL(url);
-      return detailUrl.hostname.endsWith("tianyiso.com") && /^\/s\/[A-Za-z0-9_-]+\/?$/.test(detailUrl.pathname);
-    } catch (error) {
-      return false;
-    }
-  }
-
   private extractTianyiShareLinks(content: string): string[] {
     const patterns = [
       /https?:\/\/cloud\.189\.cn\/web\/share\?[^\s"'<>（）()]+/g,
@@ -795,64 +1002,33 @@ export class Searcher {
     return Array.from(result);
   }
 
-  private createTianyisoBypassCookie(html: string): string {
-    const challengeToken = this.extractTianyisoChallengeToken(html);
-    if (!challengeToken) {
-      return "";
-    }
-
-    const key = Buffer.from("1234567812345678", "utf8");
-    const cipher = createCipheriv("aes-128-cbc", key, key);
-    const encrypted =
-      cipher.update(challengeToken, "utf8", "hex") + cipher.final("hex");
-
-    return `ck_ml_sea_=${encrypted}`;
-  }
-
-  private extractTianyisoChallengeToken(html: string): string {
-    const match = html.match(/start_load\("([a-f0-9]{32,})"\)/i);
-    return match?.[1] || "";
-  }
-
-  private matchesKeyword(text: string, keyword: string): boolean {
-    const normalizedText = this.normalizeSearchText(text);
-    const normalizedKeyword = this.normalizeSearchText(keyword);
-
-    if (!normalizedKeyword) {
-      return true;
-    }
-
-    if (!normalizedText) {
-      return false;
-    }
-
-    if (normalizedText.includes(normalizedKeyword)) {
-      return true;
-    }
-
-    const keywordTokens = this.getKeywordTokens(keyword);
-    return keywordTokens.length > 0 && keywordTokens.every((token) => normalizedText.includes(token));
-  }
-
-  private getKeywordTokens(keyword: string): string[] {
-    const tokens = keyword
-      .split(/[\s\-_.·•:：;；,，/\\|()[\]{}"'“”‘’<>《》【】!?！？]+/)
-      .map((item) => this.normalizeSearchText(item))
-      .filter((item) => item.length > 1);
-
-    if (tokens.length > 0) {
-      return tokens;
-    }
-
-    const fallback = this.normalizeSearchText(keyword);
-    return fallback ? [fallback] : [];
-  }
-
-  private normalizeSearchText(value: string): string {
+  private normalizeValidationText(value: string): string {
     return this.decodeHtml(value)
       .toLowerCase()
       .replace(/<[^>]*>/g, " ")
-      .replace(/[\s\-_.·•:：;；,，/\\|()[\]{}"'“”‘’<>《》【】!?！？]+/g, "");
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private hasInvalidShareMarkers(text: string): boolean {
+    if (!text) {
+      return false;
+    }
+
+    return [
+      "文件不存在",
+      "资源不存在",
+      "分享已取消",
+      "分享已失效",
+      "链接不存在",
+      "来晚了",
+      "来晚啦",
+      "啊哦",
+      "not found",
+      "invalid link",
+      "share has been canceled",
+      "the file you visited does not exist",
+    ].some((marker) => text.includes(marker));
   }
 
   private stripTags(value: string): string {
