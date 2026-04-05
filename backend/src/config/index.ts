@@ -33,17 +33,7 @@ interface Config {
     host: string;
     port: number;
   };
-  tianyiso: {
-    cookie: string;
-    userAgent: string;
-    solver: {
-      url: string;
-      session: string;
-      timeoutMs: number;
-      waitInSeconds: number;
-      tabsTillVerify: number;
-    };
-  };
+
   cloudPatterns: CloudPatterns;
   app: {
     port: number;
@@ -113,19 +103,6 @@ export const config: Config = {
     enabled: process.env.PROXY_ENABLED === "true",
     host: process.env.HTTP_PROXY_HOST || "",
     port: parseInt(process.env.HTTP_PROXY_PORT || "0"),
-  },
-  tianyiso: {
-    cookie: process.env.TIANYISO_COOKIE || "",
-    userAgent:
-      process.env.TIANYISO_USER_AGENT ||
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-    solver: {
-      url: process.env.TIANYISO_SOLVER_URL || "",
-      session: process.env.TIANYISO_SOLVER_SESSION || "",
-      timeoutMs: parseInt(process.env.TIANYISO_SOLVER_TIMEOUT_MS || "120000"),
-      waitInSeconds: parseInt(process.env.TIANYISO_SOLVER_WAIT_SECONDS || "2"),
-      tabsTillVerify: parseInt(process.env.TIANYISO_SOLVER_TABS_TILL_VERIFY || "0"),
-    },
   },
   cloudPatterns: {
     baiduPan: /https?:\/\/(?:pan|yun)\.baidu\.com\/[^\s<>"]+/g,

@@ -5,7 +5,7 @@
         <p class="hero__eyebrow">CloudSaver Search</p>
         <h1>只保留资源搜索的轻量版本</h1>
         <p class="hero__description">
-          面向 `cloud189-auto-save` 的兼容接口保留不变，网页端聚焦 Telegram 频道、雷鲸小站与天翼搜资源检索。
+          面向 `cloud189-auto-save` 的兼容接口保留不变，网页端聚焦 Telegram 频道与雷鲸小站资源检索。
         </p>
       </div>
       <el-button class="hero__logout" plain @click="logout">退出登录</el-button>
@@ -128,7 +128,7 @@ const loadMore = async (channelId: string) => {
 };
 
 const getPrimaryLink = (resource: ResourceItem) => {
-  return resource.cloudLinks[0] || "";
+  return resource.cloudLinks[0] || resource.articleUrl || "";
 };
 
 const openLink = (resource: ResourceItem) => {
