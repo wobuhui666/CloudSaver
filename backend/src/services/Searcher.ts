@@ -1,3 +1,4 @@
+import "../utils/runtimePolyfills";
 import { AxiosInstance, AxiosHeaders } from "axios";
 import { createAxiosInstance } from "../utils/axiosInstance";
 import * as cheerio from "cheerio";
