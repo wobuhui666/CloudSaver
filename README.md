@@ -1,6 +1,6 @@
 # CloudSaver Search
 
-面向 `/tmp/workspaces/cloud189-auto-save` 的轻量搜索版 `CloudSaver`。
+面向 `cloud189-auto-save` 的轻量搜索版 `CloudSaver`。
 
 这个版本只保留两件事：
 
@@ -8,6 +8,8 @@
 2. `GET /api/search` 搜索 Telegram 频道、影巢免费资源与雷鲸小站资源
 
 其余转存、设置、豆瓣、赞助页等功能都不再作为运行链路的一部分。
+
+## docker镜像：ghcr.io/wobuhui666/cloudsaver
 
 ## 兼容目标
 
@@ -20,8 +22,6 @@
 这版接口继续保持兼容，并且搜索结果里的 `cloudLinks` 已调整为对象数组格式，`cloud189-auto-save` 可以直接消费。
 
 ## 环境变量
-
-在 `backend/.env` 中配置：
 
 ```env
 JWT_SECRET=replace_me
