@@ -4,10 +4,12 @@ import { createAxiosInstance } from "../utils/axiosInstance";
 import * as cheerio from "cheerio";
 import { config } from "../config";
 import { logger } from "../utils/logger";
+import { cacheManager } from "../utils/CacheManager";
 
 interface CloudLinkItem {
   cloudType: string;
   link: string;
+  accessCode?: string;
 }
 
 interface SourceItem {
@@ -172,6 +174,70 @@ export class Searcher {
     };
   }
 
+  // 提取码正则模式：匹配 "提取码/密码/访问码/口令" 后跟 4-8 位字母数字
+  private static readonly ACCESS_CODE_PATTERNS = [
+    /(?:提取码|提取密码|取码)[：:\s=]*([A-Za-z0-9]{4,8})/g,
+    /(?:密码|访问码|口令|暗号)[：:\s=]*([A-Za-z0-9]{4,8})/g,
+    /(?:提取码|密码|访问码)[\s]*[为是]\s*([A-Za-z0-9]{4,8})/g,
+    /【(?:提取码|密码|访问码)】[：:\s]*([A-Za-z0-9]{4,8})/g,
+    /(?:code|pass(?:word)?|pwd)[：:\s=]*([A-Za-z0-9]{4,8})/gi,
+  ];
+
+  /**
+   * 从文本中提取提取码，并关联到最近的网盘链接
+   * 返回 Map<link, accessCode>
+   */
+  private extractAccessCodes(text: string, links: string[]): Map<string, string> {
+    const result = new Map<string, string>();
+    if (!text || links.length === 0) return result;
+
+    // 去除 HTML 标签，保留纯文本
+    const plainText = text.replace(/<[^>]*>/g, " ").replace(/&[a-z]+;/gi, " ");
+
+    // 收集所有提取码及其在文本中的位置
+    const codeMatches: { code: string; index: number }[] = [];
+    for (const pattern of Searcher.ACCESS_CODE_PATTERNS) {
+      // 每次使用前重置 lastIndex
+      pattern.lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(plainText)) !== null) {
+        const code = match[1];
+        if (code && code.length >= 4) {
+          codeMatches.push({ code, index: match.index });
+        }
+      }
+    }
+
+    if (!codeMatches.length) return result;
+
+    // 找到每个链接在文本中的位置，然后匹配最近的提取码
+    for (const link of links) {
+      const linkIndex = plainText.indexOf(link);
+      if (linkIndex === -1) continue;
+
+      // 找距离这个链接最近的提取码（优先链接后面出现的）
+      let bestCode = "";
+      let bestDist = Infinity;
+
+      for (const cm of codeMatches) {
+        const dist = Math.abs(cm.index - linkIndex);
+        // 优先选择链接之后出现的提取码，权重更高
+        const weightedDist = cm.index >= linkIndex ? dist : dist * 1.5;
+        if (weightedDist < bestDist) {
+          bestDist = weightedDist;
+          bestCode = cm.code;
+        }
+      }
+
+      if (bestCode && bestDist < 500) {
+        // 500 字符内的提取码才关联
+        result.set(link, bestCode);
+      }
+    }
+
+    return result;
+  }
+
   async validateLink(url: string): Promise<LinkValidationResult> {
     const checkedAt = new Date().toISOString();
     const normalizedUrl = url.trim();
@@ -298,7 +364,22 @@ export class Searcher {
     };
   }
 
-  async searchAll(keyword: string, channelId?: string, messageId?: string) {
+  // 搜索结果缓存 TTL: 5 分钟
+  private static readonly SEARCH_CACHE_TTL = 5 * 60 * 1000;
+  // TMDB 搜索缓存 TTL: 30 分钟
+  private static readonly TMDB_CACHE_TTL = 30 * 60 * 1000;
+
+  async searchAll(keyword: string, channelId?: string, messageId?: string, fast = false) {
+    // 检查搜索结果缓存（仅缓存无 messageId 的普通搜索）
+    const cacheKey = `search:${keyword}:${channelId || "all"}:${fast ? "fast" : "full"}`;
+    if (!messageId) {
+      const cached = cacheManager.get<{ data: SearchGroup[] }>(cacheKey);
+      if (cached) {
+        logger.info(`命中搜索缓存: ${keyword}`);
+        return cached;
+      }
+    }
+
     const allResults: SearchGroup[] = [];
     const isLeijingOnly = channelId === "leijing2";
     const isHDHiveOnly = channelId === "hdhive";
@@ -315,42 +396,67 @@ export class Searcher {
       };
     }
 
-    const telegramGroups = await this.mapWithConcurrency(
-      channelList,
-      this.telegramSearchConcurrency,
-      async (channel) => this.searchTelegramChannel(channel, keyword, messageId)
-    );
+    // 三大搜索源并行查询（原来 TG 完成后才查 HDHive/Leijing，现在同时发起）
+    const searchTasks: Promise<SearchGroup[]>[] = [];
 
-    allResults.push(
-      ...telegramGroups.filter((group): group is SearchGroup => Boolean(group))
-    );
+    // TG 频道搜索
+    if (channelList.length > 0) {
+      searchTasks.push(
+        this.mapWithConcurrency(
+          channelList,
+          this.telegramSearchConcurrency,
+          async (channel) => this.searchTelegramChannel(channel, keyword, messageId)
+        ).then(groups => groups.filter((g): g is SearchGroup => Boolean(g)))
+      );
+    }
 
+    // 影巢搜索
     if (!messageId && keyword.trim() && (!channelId || isHDHiveOnly)) {
-      try {
-        const hdhiveGroup = await this.searchHDHive(keyword.trim());
-        if (hdhiveGroup?.list.length) {
-          allResults.push(hdhiveGroup);
-        }
-      } catch (error) {
-        logger.error("搜索影巢失败:", error);
-      }
+      searchTasks.push(
+        this.searchHDHive(keyword.trim())
+          .then(group => group ? [group] : [])
+          .catch(error => {
+            logger.error("搜索影巢失败:", error);
+            return [];
+          })
+      );
     }
 
+    // 雷鲸小站搜索
     if (!messageId && (!channelId || isLeijingOnly)) {
-      try {
-        const leijingGroup = await this.searchLeijing(keyword);
-        if (leijingGroup.list.length > 0) {
-          allResults.push(leijingGroup);
-        }
-      } catch (error) {
-        logger.error("搜索雷鲸小站失败:", error);
+      searchTasks.push(
+        this.searchLeijing(keyword)
+          .then(group => group.list.length > 0 ? [group] : [])
+          .catch(error => {
+            logger.error("搜索雷鲸小站失败:", error);
+            return [];
+          })
+      );
+    }
+
+    const searchResults = await Promise.allSettled(searchTasks);
+    for (const result of searchResults) {
+      if (result.status === "fulfilled") {
+        allResults.push(...result.value);
       }
     }
 
-    const validatedResults = await this.filterSearchGroups(allResults);
-    return {
-      data: validatedResults,
-    };
+    // fast 模式跳过链接验证，直接返回
+    let finalResults: SearchGroup[];
+    if (fast) {
+      finalResults = allResults.filter(g => g.list.length > 0);
+    } else {
+      finalResults = await this.filterSearchGroups(allResults);
+    }
+
+    const response = { data: finalResults };
+
+    // 缓存搜索结果
+    if (!messageId) {
+      cacheManager.set(cacheKey, response, Searcher.SEARCH_CACHE_TTL);
+    }
+
+    return response;
   }
 
   private async filterSearchGroups(groups: SearchGroup[]): Promise<SearchGroup[]> {
@@ -470,6 +576,14 @@ export class Searcher {
   }
 
   private async fetchTMDBSearchCandidates(keyword: string): Promise<TMDBSearchCandidate[]> {
+    // TMDB 搜索结果缓存
+    const tmdbCacheKey = `tmdb:${keyword}`;
+    const cachedTMDB = cacheManager.get<TMDBSearchCandidate[]>(tmdbCacheKey);
+    if (cachedTMDB) {
+      logger.info(`命中 TMDB 缓存: ${keyword}`);
+      return cachedTMDB;
+    }
+
     const searchUrl = `${this.tmdbBaseUrl}/search?query=${encodeURIComponent(keyword)}`;
     const response = await this.api?.get<string>(searchUrl, {
       baseURL: undefined,
@@ -849,6 +963,21 @@ export class Searcher {
           }
         });
         const cloudInfo = this.extractCloudLinks(links.join(" "));
+
+        // 从消息全文中提取提取码并关联到链接
+        const fullMessageHtml = messageEl.find(".tgme_widget_message_text").html() || "";
+        const fullMessageText = fullMessageHtml.replace(/<br\s*\/?>/gi, "\n");
+        const linkStrings = cloudInfo.links.map(l => l.link);
+        const accessCodeMap = this.extractAccessCodes(fullMessageText, linkStrings);
+        if (accessCodeMap.size > 0) {
+          cloudInfo.links.forEach(linkItem => {
+            const code = accessCodeMap.get(linkItem.link);
+            if (code) {
+              linkItem.accessCode = code;
+            }
+          });
+        }
+
         items.unshift({
           messageId,
           title,
@@ -947,10 +1076,11 @@ export class Searcher {
       linkSet.set(link, { cloudType: "tianyi", link });
     });
 
+    let articleContent = "";
     try {
       const html = await this.fetchLeijingArticlePage(post.url);
-      const content = this.extractLeijingArticleContent(html);
-      this.extractTianyiShareLinks(content).forEach((link) => {
+      articleContent = this.extractLeijingArticleContent(html);
+      this.extractTianyiShareLinks(articleContent).forEach((link) => {
         linkSet.set(link, { cloudType: "tianyi", link });
       });
     } catch (error) {
@@ -960,6 +1090,19 @@ export class Searcher {
     const cloudLinks = Array.from(linkSet.values());
     if (!cloudLinks.length) {
       return null;
+    }
+
+    // 从文章内容中提取提取码
+    const fullText = `${post.abstract}\n${articleContent}`;
+    const linkStrings = cloudLinks.map(l => l.link);
+    const accessCodeMap = this.extractAccessCodes(fullText, linkStrings);
+    if (accessCodeMap.size > 0) {
+      cloudLinks.forEach(linkItem => {
+        const code = accessCodeMap.get(linkItem.link);
+        if (code) {
+          linkItem.accessCode = code;
+        }
+      });
     }
 
     return {

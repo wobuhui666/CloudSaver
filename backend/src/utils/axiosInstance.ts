@@ -1,10 +1,16 @@
 import axios, { AxiosInstance, AxiosRequestHeaders } from "axios";
+import http from "http";
+import https from "https";
 import tunnel from "tunnel";
 
 interface ProxyConfig {
   host: string;
   port: number;
 }
+
+// 全局连接池，复用 TCP 连接
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 10 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 20, maxFreeSockets: 10 });
 
 export function createAxiosInstance(
   baseURL: string,
@@ -16,6 +22,7 @@ export function createAxiosInstance(
   if (useProxy && proxyConfig) {
     agent = tunnel.httpsOverHttp({
       proxy: proxyConfig,
+      maxSockets: 20,
     });
   }
 
@@ -23,7 +30,10 @@ export function createAxiosInstance(
     baseURL,
     timeout: 30000,
     headers,
-    httpsAgent: useProxy ? agent : undefined,
+    httpAgent: useProxy ? undefined : httpAgent,
+    httpsAgent: useProxy ? agent : httpsAgent,
     withCredentials: true,
+    // 启用 gzip 压缩
+    decompress: true,
   });
 }

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { ApiResponse } from "../core/ApiResponse";
 import { Searcher } from "../services/Searcher";
 import { UserService } from "../services/UserService";
+import { cacheManager } from "../utils/CacheManager";
 
 const router = Router();
 const searcher = new Searcher();
@@ -32,17 +33,24 @@ router.post("/user/login", async (req, res) => {
 
 router.get("/search", async (req, res) => {
   try {
-    const { keyword = "", channelId = "", lastMessageId = "" } = req.query;
+    const { keyword = "", channelId = "", lastMessageId = "", fast = "" } = req.query;
     const result = await searcher.searchAll(
       String(keyword),
       String(channelId),
-      String(lastMessageId)
+      String(lastMessageId),
+      fast === "true" || fast === "1"
     );
     res.json(ApiResponse.success(result.data));
   } catch (error) {
     const message = error instanceof Error ? error.message : "搜索失败";
     res.status(200).json(ApiResponse.error(message));
   }
+});
+
+// 手动清除搜索缓存
+router.post("/cache/clear", (_req, res) => {
+  cacheManager.clear();
+  res.json(ApiResponse.success(null, "缓存已清除"));
 });
 
 router.get("/link/validate", async (req, res) => {
