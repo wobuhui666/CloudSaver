@@ -5,7 +5,7 @@
 这个版本只保留两件事：
 
 1. `POST /api/user/login` 登录拿 token
-2. `GET /api/search` 搜索 Telegram 频道、影巢免费资源与雷鲸小站资源
+2. `GET /api/search` 搜索 Telegram 频道、影巢免费资源（不可用）与雷鲸小站资源
 
 其余转存、设置、豆瓣、赞助页等功能都不再作为运行链路的一部分。
 
